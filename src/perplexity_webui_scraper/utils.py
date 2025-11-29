@@ -124,50 +124,69 @@ class PromptCall:
         else:
             return self._complete_response()
 
+    def _make_request(self):
+        """Make the API request using curl_cffi"""
+        from curl_cffi import requests as curl_requests
+        
+        # Add X-Request-Id header matching frontend_uuid
+        headers = dict(self._parent._headers)
+        frontend_uuid = self._json_data.get("params", {}).get("frontend_uuid")
+        if frontend_uuid:
+            headers["X-Request-Id"] = frontend_uuid
+        
+        response = curl_requests.post(
+            "https://www.perplexity.ai/rest/sse/perplexity_ask",
+            json=self._json_data,
+            headers=headers,
+            cookies=self._parent._cookies,
+            impersonate=self._parent._impersonate,
+            timeout=120,
+        )
+        return response
+
     def _complete_response(self) -> Response:
         """Execute request and block until complete"""
 
         self._parent.reset_response_data()
 
         try:
-            self._parent._client.get("https://www.perplexity.ai/search/new", params={"q": self._json_data["query_str"]})
+            response = self._make_request()
+            
+            if response.status_code == 403:
+                raise PermissionError(
+                    "Access forbidden (403). Your session token is invalid or expired. "
+                    "Please obtain a new session token from your browser cookies."
+                )
+            elif response.status_code == 429:
+                raise ConnectionError("Rate limit exceeded (429). Please wait a moment before trying again.")
+            
+            response.raise_for_status()
+            
+            # Parse SSE response
+            for line in response.text.split("\n"):
+                line = line.strip()
+                if line.startswith("data: "):
+                    data = self._parent._extract_json_line(line)
+                    if data:
+                        self._parent._process_data(data)
+                        if data.get("final") or data.get("final_sse_message"):
+                            break
+
+        except PermissionError:
+            raise
+        except ConnectionError:
+            raise
         except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "status_code"):
-                if e.response.status_code == 403:
+            if hasattr(e, "response"):
+                status_code = getattr(e.response, "status_code", None)
+                if status_code == 403:
                     raise PermissionError(
                         "Access forbidden (403). Your session token is invalid or expired. "
                         "Please obtain a new session token from your browser cookies."
                     ) from e
-                elif e.response.status_code == 429:
+                elif status_code == 429:
                     raise ConnectionError("Rate limit exceeded (429). Please wait a moment before trying again.") from e
-
             raise e
-
-        with self._parent._client.stream(
-            "POST", "https://www.perplexity.ai/rest/sse/perplexity_ask", json=self._json_data
-        ) as response:
-            try:
-                response.raise_for_status()
-            except Exception as e:
-                if hasattr(e, "response") and hasattr(e.response, "status_code"):
-                    if e.response.status_code == 403:
-                        raise PermissionError(
-                            "Access forbidden (403). Your session token is invalid or expired. "
-                            "Please obtain a new session token from your browser cookies."
-                        ) from e
-                    elif e.response.status_code == 429:
-                        raise ConnectionError("Rate limit exceeded (429). Please wait a moment before trying again.") from e
-
-                raise e
-
-            for line in response.iter_lines():
-                data = self._parent._extract_json_line(line)
-
-                if data:
-                    self._parent._process_data(data)
-
-                    if data.get("final"):
-                        break
 
         return Response(
             title=self._parent.title,
@@ -185,54 +204,54 @@ class PromptCall:
         self._parent.reset_response_data()
 
         try:
-            self._parent._client.get("https://www.perplexity.ai/search/new", params={"q": self._json_data["query_str"]})
+            response = self._make_request()
+            
+            if response.status_code == 403:
+                raise PermissionError(
+                    "Access forbidden (403). Your session token is invalid or expired. "
+                    "Please obtain a new session token from your browser cookies."
+                )
+            elif response.status_code == 429:
+                raise ConnectionError("Rate limit exceeded (429). Please wait a moment before trying again.")
+            
+            response.raise_for_status()
+            
+            # Parse SSE response
+            for line in response.text.split("\n"):
+                line = line.strip()
+                if line.startswith("data: "):
+                    data = self._parent._extract_json_line(line)
+                    if data:
+                        self._parent._process_data(data)
+                        
+                        yield Response(
+                            title=self._parent.title,
+                            answer=self._parent.answer,
+                            chunks=list(self._parent.chunks),
+                            last_chunk=self._parent.last_chunk,
+                            search_results=list(self._parent.search_results),
+                            conversation_uuid=self._parent.conversation_uuid,
+                            raw_data=data,
+                        )
+                        
+                        if data.get("final") or data.get("final_sse_message"):
+                            break
+
+        except PermissionError:
+            raise
+        except ConnectionError:
+            raise
         except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "status_code"):
-                if e.response.status_code == 403:
+            if hasattr(e, "response"):
+                status_code = getattr(e.response, "status_code", None)
+                if status_code == 403:
                     raise PermissionError(
                         "Access forbidden (403). Your session token is invalid or expired. "
                         "Please obtain a new session token from your browser cookies."
                     ) from e
-                elif e.response.status_code == 429:
+                elif status_code == 429:
                     raise ConnectionError("Rate limit exceeded (429). Please wait a moment before trying again.") from e
-
             raise e
-
-        with self._parent._client.stream(
-            "POST", "https://www.perplexity.ai/rest/sse/perplexity_ask", json=self._json_data
-        ) as response:
-            try:
-                response.raise_for_status()
-            except Exception as e:
-                if hasattr(e, "response") and hasattr(e.response, "status_code"):
-                    if e.response.status_code == 403:
-                        raise PermissionError(
-                            "Access forbidden (403). Your session token is invalid or expired. "
-                            "Please obtain a new session token from your browser cookies."
-                        ) from e
-                    elif e.response.status_code == 429:
-                        raise ConnectionError("Rate limit exceeded (429). Please wait a moment before trying again.") from e
-
-                raise e
-
-            for line in response.iter_lines():
-                data = self._parent._extract_json_line(line)
-
-                if data:
-                    self._parent._process_data(data)
-
-                    yield Response(
-                        title=self._parent.title,
-                        answer=self._parent.answer,
-                        chunks=list(self._parent.chunks),
-                        last_chunk=self._parent.last_chunk,
-                        search_results=list(self._parent.search_results),
-                        conversation_uuid=self._parent.conversation_uuid,
-                        raw_data=data,
-                    )
-
-                    if data.get("final"):
-                        break
 
 
 def citation_replacer(match: Match[str], citation_mode: ModeValue, search_results: list[SearchResultItem]) -> str:

@@ -5,7 +5,7 @@ from re import match
 from typing import Any
 from uuid import uuid4
 
-from httpx import Client, Timeout
+from curl_cffi import requests as curl_requests
 from orjson import loads
 
 from .models import Model, Models
@@ -20,45 +20,91 @@ from .utils import (
     format_citations,
 )
 
+# Supported block use cases for the API
+SUPPORTED_BLOCK_USE_CASES = [
+    "answer_modes",
+    "media_items",
+    "knowledge_cards",
+    "inline_entity_cards",
+    "place_widgets",
+    "finance_widgets",
+    "prediction_market_widgets",
+    "sports_widgets",
+    "flight_status_widgets",
+    "shopping_widgets",
+    "jobs_widgets",
+    "search_result_widgets",
+    "clarification_responses",
+    "inline_images",
+    "inline_assets",
+    "placeholder_cards",
+    "diff_blocks",
+    "inline_knowledge_cards",
+    "entity_group_v2",
+    "refinement_filters",
+    "canvas_mode",
+    "maps_preview",
+    "answer_tabs",
+    "price_comparison_widgets",
+    "preserve_latex",
+]
+
+SUPPORTED_FEATURES = ["browser_agent_permission_banner"]
+
 
 class Perplexity:
     """Client for interacting with Perplexity AI WebUI"""
 
-    def __init__(self, session_token: str) -> None:
+    def __init__(self, session_token: str = None, cookies: str = None) -> None:
         """
         Initialize the Perplexity client.
 
         Args:
             session_token: The session token (`__Secure-next-auth.session-token` cookie) to use for authentication.
+            cookies: Full cookie string from browser (alternative to session_token). Copy from DevTools Network tab.
 
         Raises:
-            ValueError: If session_token is empty or None
+            ValueError: If neither session_token nor cookies is provided
         """
 
-        if not session_token or not session_token.strip():
-            raise ValueError("session_token cannot be empty or None")
+        if not session_token and not cookies:
+            raise ValueError("Either session_token or cookies must be provided")
 
         self._headers: dict[str, str] = {
-            "Accept": "text/event-stream, application/json",
+            "Accept": "text/event-stream",
+            "Accept-Language": "en-US,en;q=0.5",
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) Gecko/20100101 Firefox/145.0",
             "Referer": "https://www.perplexity.ai/",
             "Origin": "https://www.perplexity.ai",
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
+            "X-Perplexity-Request-Reason": "perplexity-query-state-provider",
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
-            "DNT": "1",
-            "TE": "trailers",
         }
-        self._cookies: dict[str, str] = {"__Secure-next-auth.session-token": session_token}
-        self._client: Client = Client(headers=self._headers, cookies=self._cookies, timeout=Timeout(1800, read=None))
+        
+        # Parse cookies - either from full cookie string or just session token
+        if cookies:
+            self._cookies = self._parse_cookie_string(cookies)
+        else:
+            self._cookies = {"__Secure-next-auth.session-token": session_token}
+        
         self._citation_mode: CitationMode
         self.reset_response_data()
 
         self._max_files: int = 30
         self._max_file_size: int = 50 * 1024 * 1024
+        self._impersonate: str = "firefox"  # Use Firefox TLS fingerprint
+    
+    @staticmethod
+    def _parse_cookie_string(cookie_string: str) -> dict[str, str]:
+        """Parse a cookie string from browser into a dictionary"""
+        cookies = {}
+        for item in cookie_string.split("; "):
+            if "=" in item:
+                key, value = item.split("=", 1)
+                cookies[key.strip()] = value.strip()
+        return cookies
 
     def reset_response_data(self) -> None:
         self.title = None
@@ -147,9 +193,13 @@ class Perplexity:
                 }
             }
 
-            response = self._client.post(
+            response = curl_requests.post(
                 "https://www.perplexity.ai/rest/uploads/batch_create_upload_urls",
                 json=json_data,
+                headers=self._headers,
+                cookies=self._cookies,
+                impersonate=self._impersonate,
+                timeout=60,
             )
 
             response.raise_for_status()
@@ -205,12 +255,15 @@ class Perplexity:
                     raise ValueError(f"File upload error: {str(e)}") from e
 
         sources = [source_focus.value] if not isinstance(source_focus, list) else [s.value for s in source_focus]
+        
+        # Generate unique frontend UUID for this request
+        frontend_uuid = str(uuid4())
 
         return {
             "params": {
                 "attachments": file_urls,
                 "language": language,
-                "timezone": timezone,
+                "timezone": timezone or "America/New_York",
                 "client_coordinates": {
                     "location_lat": coordinates[0],
                     "location_lng": coordinates[1],
@@ -224,11 +277,23 @@ class Perplexity:
                 "search_focus": search_focus.value,
                 "search_recency_filter": time_range.value if time_range.value else None,
                 "is_incognito": not save_to_library,
-                "use_schematized_api": False,
-                "local_search_enabled": True,
+                "use_schematized_api": True,
+                "local_search_enabled": False,
                 "prompt_source": "user",
-                "send_back_text_in_streaming_api": True,
+                "send_back_text_in_streaming_api": False,
                 "version": "2.18",
+                "frontend_uuid": frontend_uuid,
+                "query_source": "home",
+                "is_related_query": False,
+                "is_sponsored": False,
+                "supported_block_use_cases": SUPPORTED_BLOCK_USE_CASES,
+                "supported_features": SUPPORTED_FEATURES,
+                "skip_search_enabled": True,
+                "is_nav_suggestions_disabled": False,
+                "should_ask_for_mcp_tool_confirmation": True,
+                "mentions": [],
+                "always_search_override": False,
+                "override_no_search": False,
             },
             "query_str": query,
         }
@@ -239,7 +304,73 @@ class Perplexity:
     ) -> None:
         if self.conversation_uuid is None and "backend_uuid" in data:
             self.conversation_uuid = data["backend_uuid"]
+        
+        # Get thread title
+        if data.get("thread_url_slug"):
+            self.title = data.get("thread_url_slug")
 
+        # Handle schematized API response format with blocks
+        if "blocks" in data:
+            for block in data.get("blocks", []):
+                # Handle diff_block format (new API)
+                diff_block = block.get("diff_block")
+                if diff_block:
+                    field = diff_block.get("field", "")
+                    patches = diff_block.get("patches", [])
+                    
+                    for patch in patches:
+                        value = patch.get("value")
+                        if not value:
+                            continue
+                        
+                        # Extract answer from markdown_block patches
+                        if field == "markdown_block" and isinstance(value, dict):
+                            answer_text = value.get("answer")
+                            if answer_text:
+                                self.answer = format_citations(self._citation_mode, answer_text, self.search_results)
+                                self.chunks = value.get("chunks", [])
+                                self.last_chunk = self.chunks[-1] if self.chunks else None
+                        
+                        # Extract answer from direct string value
+                        elif field == "markdown_block" and isinstance(value, str):
+                            self.answer = format_citations(self._citation_mode, value, self.search_results)
+                        
+                        # Extract search results
+                        elif field == "search_results_block" and isinstance(value, dict):
+                            results = value.get("results", [])
+                            self.search_results = [
+                                SearchResultItem(
+                                    title=r.get("title") or r.get("name"),
+                                    snippet=r.get("snippet"),
+                                    url=r.get("url")
+                                )
+                                for r in results if isinstance(r, dict)
+                            ]
+                
+                # Handle direct block_type format (legacy)
+                block_type = block.get("block_type")
+                content = block.get("content", {})
+                
+                if block_type == "markdown":
+                    answer_text = content.get("text") or content.get("answer")
+                    if answer_text:
+                        self.answer = format_citations(self._citation_mode, answer_text, self.search_results)
+                
+                elif block_type == "search_results":
+                    results = content.get("results", [])
+                    self.search_results = [
+                        SearchResultItem(
+                            title=r.get("title") or r.get("name"),
+                            snippet=r.get("snippet"),
+                            url=r.get("url")
+                        )
+                        for r in results if isinstance(r, dict)
+                    ]
+            
+            self.raw_data = data
+            return
+
+        # Handle legacy text-based response format
         if "text" in data:
             json_data = loads(data["text"])
             answer_data = {}
